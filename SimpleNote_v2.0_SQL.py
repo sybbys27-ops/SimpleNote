@@ -3,6 +3,7 @@ import json
 import shutil
 import re
 import sqlite3 # SQLite db저장
+import webbrowser
 import sys  # sys 모듈 추가
 import tkinter as tk
 from tkinter import messagebox, simpledialog
@@ -56,6 +57,10 @@ class SimpleNoteApp(tk.Tk):
         self.current_note_id = None
         self.tree_iid_to_folder_id = {}
         self.tree_iid_to_note_id = {}
+        self.search_window = None
+        self.search_listbox = None
+        self.search_result_note_ids = []
+        self.link_tags = []
 
         # 폰트
         self.font_family = DEFAULT_FONT_FAMILY
@@ -137,6 +142,9 @@ class SimpleNoteApp(tk.Tk):
         self.tree = ttk.Treeview(left, show="tree")
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        # 폴더 단계가 눈에 잘 들어오도록 옅은 배경색 적용
+        self.tree.tag_configure("folder_level1", background="#EAF3FF")
+        self.tree.tag_configure("folder_level2", background="#EEF8E8")
 
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.tree.bind("<Button-1>", self.on_tree_click_toggle)
@@ -169,139 +177,223 @@ class SimpleNoteApp(tk.Tk):
 
         # Tab 4칸 수정
         self.text.bind("<Tab>", self.handle_tab)
+        # 입력 중 URL이 추가/수정되면 링크 태그 갱신
+        self.text.bind("<KeyRelease>", self._on_text_key_release, add="+")
 
 
-# ---------------- Data IO (SQLite 적용) ----------------
+# ---------------- Data IO (SQLite CRUD 적용) ----------------
+    def _connect_db(self):
+        conn = sqlite3.connect(DATA_FILE)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
     def init_db(self):
-        """앱 시작 시 DB 파일과 테이블(표)이 없으면 생성합니다."""
-        with sqlite3.connect(DATA_FILE) as conn:
+        """DB/테이블을 만들고 기존 v2.0 DB에는 parent_id 컬럼을 자동 추가합니다."""
+        with self._connect_db() as conn:
             cur = conn.cursor()
-            # 폴더 테이블 생성
-            cur.execute('''CREATE TABLE IF NOT EXISTS folders
-                           (id TEXT PRIMARY KEY, name TEXT)''')
-            # 노트 테이블 생성
-            cur.execute('''CREATE TABLE IF NOT EXISTS notes
-                           (id TEXT PRIMARY KEY, folder_id TEXT, title TEXT, body TEXT, highlights TEXT)''')
+            cur.execute("""CREATE TABLE IF NOT EXISTS folders
+                           (id TEXT PRIMARY KEY, name TEXT, parent_id TEXT)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS notes
+                           (id TEXT PRIMARY KEY, folder_id TEXT, title TEXT, body TEXT, highlights TEXT)""")
+
+            # 기존 DB의 folders 테이블에는 parent_id가 없으므로 마이그레이션
+            cur.execute("PRAGMA table_info(folders)")
+            columns = {row[1] for row in cur.fetchall()}
+            if "parent_id" not in columns:
+                cur.execute("ALTER TABLE folders ADD COLUMN parent_id TEXT")
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_notes_folder_id ON notes(folder_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders(parent_id)")
             conn.commit()
 
     def load_all(self):
-        self.init_db()  # DB 및 테이블 초기 셋팅
+        self.init_db()
         self.folders = []
         self.notes = []
 
-        # DB에서 데이터 불러와서 기존 UI가 인식하는 리스트에 채우기
-        if DATA_FILE.exists():
-            with sqlite3.connect(DATA_FILE) as conn:
-                cur = conn.cursor()
-                
-                # 폴더 불러오기
-                cur.execute("SELECT id, name FROM folders")
-                for row in cur.fetchall():
-                    self.folders.append({"id": row[0], "name": row[1]})
+        with self._connect_db() as conn:
+            cur = conn.cursor()
 
-                # 노트 불러오기
-                cur.execute("SELECT id, folder_id, title, body, highlights FROM notes")
-                for row in cur.fetchall():
-                    try:
-                        # 하이라이트는 텍스트로 저장되므로 다시 리스트로 변환
-                        hl = json.loads(row[4]) if row[4] else []
-                    except Exception:
-                        hl = []
-                    
-                    self.notes.append({
-                        "id": row[0], "folder_id": row[1], 
-                        "title": row[2], "body": row[3], "highlights": hl
-                    })
+            cur.execute("SELECT id, name, parent_id FROM folders ORDER BY rowid")
+            for row in cur.fetchall():
+                self.folders.append({
+                    "id": row[0],
+                    "name": row[1],
+                    "parent_id": row[2],
+                })
 
-        # 최초 실행 시 (DB가 비어있을 때) 기본 데이터 생성
+            cur.execute("SELECT id, folder_id, title, body, highlights FROM notes ORDER BY rowid")
+            for row in cur.fetchall():
+                try:
+                    hl = json.loads(row[4]) if row[4] else []
+                except Exception:
+                    hl = []
+
+                self.notes.append({
+                    "id": row[0],
+                    "folder_id": row[1],
+                    "title": row[2],
+                    "body": row[3],
+                    "highlights": hl,
+                })
+
+        # 최초 실행 시 기본 데이터는 INSERT로 한 번만 생성
         if not self.folders:
-            self.folders = [{"id": "f1", "name": "Start Folder"}]
+            folder = {"id": "f1", "name": "Start Folder", "parent_id": None}
+            self.folders.append(folder)
+            self._db_insert_folder(folder)
+
         if not self.notes:
-            self.notes = [{"id": "n1", "folder_id": "f1", "title": "메모", "body": "", "highlights": []}]
+            note = {
+                "id": "n1",
+                "folder_id": self.folders[0]["id"],
+                "title": "메모",
+                "body": "",
+                "highlights": [],
+            }
+            self.notes.append(note)
+            self._db_insert_note(note)
+
+    # ---- 개별 CRUD ----
+    def _db_insert_folder(self, folder):
+        with self._connect_db() as conn:
+            conn.execute(
+                "INSERT INTO folders (id, name, parent_id) VALUES (?, ?, ?)",
+                (folder["id"], folder.get("name", ""), folder.get("parent_id")),
+            )
+            conn.commit()
+
+    def _db_update_folder(self, folder):
+        with self._connect_db() as conn:
+            conn.execute(
+                "UPDATE folders SET name = ?, parent_id = ? WHERE id = ?",
+                (folder.get("name", ""), folder.get("parent_id"), folder["id"]),
+            )
+            conn.commit()
+
+    def _db_insert_note(self, note):
+        hl_str = json.dumps(note.get("highlights", []), ensure_ascii=False)
+        with self._connect_db() as conn:
+            conn.execute(
+                """INSERT INTO notes (id, folder_id, title, body, highlights)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    note["id"], note.get("folder_id"), note.get("title", ""),
+                    note.get("body", ""), hl_str,
+                ),
+            )
+            conn.commit()
+
+    def _db_update_note(self, note):
+        hl_str = json.dumps(note.get("highlights", []), ensure_ascii=False)
+        with self._connect_db() as conn:
+            conn.execute(
+                """UPDATE notes
+                   SET folder_id = ?, title = ?, body = ?, highlights = ?
+                   WHERE id = ?""",
+                (
+                    note.get("folder_id"), note.get("title", ""),
+                    note.get("body", ""), hl_str, note["id"],
+                ),
+            )
+            conn.commit()
+
+    def _db_delete_note(self, note_id):
+        with self._connect_db() as conn:
+            conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+            conn.commit()
+
+    def _db_delete_folders(self, folder_ids):
+        if not folder_ids:
+            return
+        placeholders = ",".join("?" for _ in folder_ids)
+        with self._connect_db() as conn:
+            conn.execute(
+                f"DELETE FROM notes WHERE folder_id IN ({placeholders})",
+                tuple(folder_ids),
+            )
+            conn.execute(
+                f"DELETE FROM folders WHERE id IN ({placeholders})",
+                tuple(folder_ids),
+            )
+            conn.commit()
 
     def save_all(self):
-        # 1. 편집기 화면의 현재 내용을 리스트에 업데이트
+        """
+        예전처럼 DB 전체를 DELETE 후 INSERT하지 않습니다.
+        현재 편집 중인 노트에서 실제 변경이 있을 때만 UPDATE합니다.
+        """
         self._save_editor_to_current_note()
 
-        # 2. 변경된 리스트의 내용을 DB에 안전하게 동기화(저장)
-        with sqlite3.connect(DATA_FILE) as conn:
-            cur = conn.cursor()
-            
-            # DB 내용을 깔끔하게 비우고 (JSON 덮어쓰기 원리)
-            cur.execute("DELETE FROM folders")
-            cur.execute("DELETE FROM notes")
-            
-            # 최신 상태로 다시 채우기
-            for f in self.folders:
-                cur.execute("INSERT INTO folders (id, name) VALUES (?, ?)", 
-                            (f["id"], f.get("name", "")))
-                
-            for n in self.notes:
-                # 하이라이트(리스트)는 글자(JSON 텍스트)로 바꿔서 DB에 저장
-                hl_str = json.dumps(n.get("highlights", []), ensure_ascii=False)
-                cur.execute("INSERT INTO notes (id, folder_id, title, body, highlights) VALUES (?, ?, ?, ?, ?)",
-                            (n["id"], n.get("folder_id"), n.get("title", ""), n.get("body", ""), hl_str))
-            conn.commit()
-            
     def on_close(self):
         try:
             self.save_all()
         finally:
             self.destroy()
-            
 
-
-
-    # ---------------- Tree build ----------------
+# ---------------- Tree build ----------------
     def _build_tree(self):
-        # 1. 현재 열려 있는 폴더 ID 추출 (안전하게 리스트 컴프리헨션 사용)
         open_folders = [
-            iid for iid in self.tree.get_children("") 
+            iid for iid in self.tree.get_children("")
             if self.tree.item(iid, "open")
         ]
-
-        # 2. 현재 선택된 항목 기억 (비어있을 수 있으므로 튜플로 받음)
         current_selection = self.tree.selection()
 
-        # 3. 트리 초기화
         self.tree.delete(*self.tree.get_children())
         self.tree_iid_to_folder_id.clear()
         self.tree_iid_to_note_id.clear()
 
-        # 4. 데이터 재구성
-        for f in self.folders:
-            iid = self._iid_folder(f["id"])
-            # 이전 상태가 열려 있었는지 확인
-            is_open = iid in open_folders
-            self.tree.insert("", "end", iid=iid, text=f.get("name", "Folder"), open=is_open)
-            self.tree_iid_to_folder_id[iid] = f["id"]
+        folder_ids = {f.get("id") for f in self.folders}
+        # parent가 없거나 유실된 폴더는 1단 폴더로 복구해서 표시
+        level1_folders = [
+            f for f in self.folders
+            if not f.get("parent_id") or f.get("parent_id") not in folder_ids
+        ]
 
+        for f in level1_folders:
+            fid = f["id"]
+            iid = self._iid_folder(fid)
+            self.tree.insert(
+                "", "end", iid=iid, text=f.get("name", "Folder"),
+                open=(iid in open_folders), tags=("folder_level1",)
+            )
+            self.tree_iid_to_folder_id[iid] = fid
+
+            # 같은 폴더 안에서는 '글'을 먼저 배치
             for n in self.notes:
-                if n.get("folder_id") == f["id"]:
+                if n.get("folder_id") == fid:
                     niid = self._iid_note(n["id"])
                     self.tree.insert(iid, "end", iid=niid, text=n.get("title", "Note"))
                     self.tree_iid_to_note_id[niid] = n["id"]
 
-        # 5. 선택 상태 복구 (지렁이가 가장 많이 생기는 구간!)
+            # 그 다음 2단 폴더를 배치
+            children = [x for x in self.folders if x.get("parent_id") == fid]
+            for child in children:
+                cfid = child["id"]
+                ciid = self._iid_folder(cfid)
+                self.tree.insert(
+                    iid, "end", iid=ciid, text=child.get("name", "Folder"),
+                    open=(ciid in open_folders), tags=("folder_level2",)
+                )
+                self.tree_iid_to_folder_id[ciid] = cfid
+
+                for n in self.notes:
+                    if n.get("folder_id") == cfid:
+                        niid = self._iid_note(n["id"])
+                        self.tree.insert(ciid, "end", iid=niid, text=n.get("title", "Note"))
+                        self.tree_iid_to_note_id[niid] = n["id"]
+
         if current_selection:
             target_iid = current_selection[0]
             if self.tree.exists(target_iid):
                 self.tree.selection_set(target_iid)
-                self.tree.see(target_iid) # 선택된 항목이 보이도록 스크롤
+                self.tree.see(target_iid)
         elif self.notes:
             first_niid = self._iid_note(self.notes[0]["id"])
             if self.tree.exists(first_niid):
                 self.tree.selection_set(first_niid)
 
-
-
-
-
-
-
-
-
-    # ---------------- Tree events ----------------
+# ---------------- Tree events ----------------
     def on_tree_select(self, event=None):
         sel = self.tree.selection()
         if not sel:
@@ -322,7 +414,7 @@ class SimpleNoteApp(tk.Tk):
             if folder_id:
                 f = self._find_folder(folder_id)
                 if f:
-                    self.path_label.config(text=f"-> {f.get('name','')}")
+                    self.path_label.config(text=f"-> {self._folder_path_name(folder_id)}")
             return
 
     def on_tree_click_toggle(self, event):
@@ -357,81 +449,143 @@ class SimpleNoteApp(tk.Tk):
         if iid.startswith("f:"):
             fid = self.tree_iid_to_folder_id.get(iid)
             folder = self._find_folder(fid) if fid else None
-            if folder: # 'is not None' 대신 존재 여부만 체크해도 지렁이가 잡힙니다.
+            if folder:
                 folder["name"] = new_name
-                    
+                self._db_update_folder(folder)
+
         elif iid.startswith("n:"):
             nid = self.tree_iid_to_note_id.get(iid)
             note = self._find_note(nid) if nid else None
             if note:
                 note["title"] = new_name
-        
+                self._db_update_note(note)
+
         self._build_tree()
-        self.save_all()
-
-
-
-
-
 
     def delete_item(self, iid):
-        if iid.startswith("f:"): # 폴더 삭제
+        if iid.startswith("f:"):
             fid = self.tree_iid_to_folder_id.get(iid)
-            child_notes = [n for n in self.notes if n.get("folder_id") == fid]
-            
-            # 폴더 내에 노트가 있는 경우 경고 강화
-            if child_notes:
-                msg = f"폴더 내에 {len(child_notes)}개의 노트가 있습니다.\n정말로 폴더와 노트를 모두 삭제하시겠습니까?"
-                if not messagebox.askyesno("삭제 확인", msg):
-                    return
-            else:
-                if not messagebox.askyesno("삭제 확인", "정말로 삭제하시겠습니까?"):
-                    return
-                    
-            self.folders = [f for f in self.folders if f["id"] != fid]
-            self.notes = [n for n in self.notes if n.get("folder_id") != fid]
-            
-        elif iid.startswith("n:"): # 노트 삭제
-            if not messagebox.askyesno("삭제 확인", "정말로 삭제하시겠습니까?"):
+            if not fid:
                 return
+
+            folder_ids = [fid]
+            # 1단 폴더 삭제 시 2단 폴더도 함께 삭제
+            folder_ids.extend([
+                f["id"] for f in self.folders
+                if f.get("parent_id") == fid
+            ])
+            child_notes = [
+                n for n in self.notes
+                if n.get("folder_id") in folder_ids
+            ]
+            nested_count = max(0, len(folder_ids) - 1)
+
+            if child_notes or nested_count:
+                msg = (
+                    f"이 폴더에는 하위 폴더 {nested_count}개, "
+                    f"노트 {len(child_notes)}개가 있습니다.\n"
+                    "폴더와 포함된 노트를 모두 삭제하시겠습니까?"
+                )
+            else:
+                msg = "정말로 이 폴더를 삭제하시겠습니까?"
+
+            if not messagebox.askyesno("삭제 확인", msg):
+                return
+
+            self._db_delete_folders(folder_ids)
+            folder_id_set = set(folder_ids)
+            self.folders = [f for f in self.folders if f["id"] not in folder_id_set]
+            self.notes = [n for n in self.notes if n.get("folder_id") not in folder_id_set]
+
+            if self.current_note_id and not self._find_note(self.current_note_id):
+                self.current_note_id = None
+                self.text.delete("1.0", tk.END)
+
+        elif iid.startswith("n:"):
+            if not messagebox.askyesno("삭제 확인", "정말로 이 노트를 삭제하시겠습니까?"):
+                return
+
             nid = self.tree_iid_to_note_id.get(iid)
+            if not nid:
+                return
+            self._db_delete_note(nid)
             self.notes = [n for n in self.notes if n["id"] != nid]
+
             if self.current_note_id == nid:
                 self.current_note_id = None
                 self.text.delete("1.0", tk.END)
 
         self._build_tree()
-        self.save_all()
-            
-       
 
-            
+    # ---------------- CRUD ----------------
 
     # ---------------- CRUD ----------------
     def new_folder(self):
-        name = simpledialog.askstring("새 폴더", "폴더 이름:")
+        parent_id = None
+
+        # 현재 선택 위치를 기준으로 '2단 폴더' 후보를 잡습니다.
+        selected_folder_id = None
+        sel = self.tree.selection()
+        if sel:
+            iid = sel[0]
+            if iid.startswith("f:"):
+                selected_folder_id = self.tree_iid_to_folder_id.get(iid)
+            elif iid.startswith("n:"):
+                nid = self.tree_iid_to_note_id.get(iid)
+                note = self._find_note(nid) if nid else None
+                selected_folder_id = note.get("folder_id") if note else None
+
+        candidate_parent_id = None
+        if selected_folder_id:
+            selected_folder = self._find_folder(selected_folder_id)
+            if selected_folder:
+                candidate_parent_id = (
+                    selected_folder["id"]
+                    if not selected_folder.get("parent_id")
+                    else selected_folder.get("parent_id")
+                )
+
+        if candidate_parent_id:
+            parent = self._find_folder(candidate_parent_id)
+            parent_name = parent.get("name", "") if parent else ""
+            make_child = messagebox.askyesno(
+                "새 폴더 위치",
+                f"'{parent_name}' 아래에 2단 폴더로 만들까요?\n"
+                "예 = 2단 폴더 / 아니오 = 새 1단 폴더"
+            )
+            if make_child:
+                parent_id = candidate_parent_id
+
+        name = simpledialog.askstring(
+            "새 폴더",
+            "2단 폴더 이름:" if parent_id else "1단 폴더 이름:"
+        )
         if not name:
             return
+
         new_id = self._new_id("f")
-        self.folders.append({"id": new_id, "name": name})
+        folder = {"id": new_id, "name": name, "parent_id": parent_id}
+        self.folders.append(folder)
+        self._db_insert_folder(folder)
         self._build_tree()
 
+        iid = self._iid_folder(new_id)
+        if self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.see(iid)
+
     def new_note(self):
-        # must have selected folder
         folder_id = None
         sel = self.tree.selection()
+
         if sel:
             iid = sel[0]
             if iid.startswith("f:"):
                 folder_id = self.tree_iid_to_folder_id.get(iid)
             elif iid.startswith("n:"):
-                # note selected -> use its folder
                 note_id = self.tree_iid_to_note_id.get(iid)
-                if note_id:
-                    n = self._find_note(note_id)
-                    folder_id = n.get("folder_id") if n else None
-                else:
-                    folder_id = None
+                n = self._find_note(note_id) if note_id else None
+                folder_id = n.get("folder_id") if n else None
 
         if folder_id is None and self.folders:
             folder_id = self.folders[0]["id"]
@@ -441,10 +595,22 @@ class SimpleNoteApp(tk.Tk):
             return
 
         new_id = self._new_id("n")
-        self.notes.append({"id": new_id, "folder_id": folder_id, "title": title, "body": "", "highlights": []})
+        note = {
+            "id": new_id,
+            "folder_id": folder_id,
+            "title": title,
+            "body": "",
+            "highlights": [],
+        }
+        self.notes.append(note)
+        self._db_insert_note(note)
         self._build_tree()
-        # select new note
-        self.tree.selection_set(self._iid_note(new_id))
+
+        niid = self._iid_note(new_id)
+        if self.tree.exists(niid):
+            self.tree.selection_set(niid)
+            self.tree.see(niid)
+
         self.current_note_id = new_id
         self.load_note(new_id)
 
@@ -453,18 +619,12 @@ class SimpleNoteApp(tk.Tk):
         if not n:
             return
 
-        # clear editor
         self.text.delete("1.0", tk.END)
+        self.text.insert("1.0", n.get("body", ""))
 
-        # insert body
-        body = n.get("body", "")
-        self.text.insert("1.0", body)
-
-        # clear tags
         for tag in self.bg_tags:
             self.text.tag_remove(tag, "1.0", tk.END)
 
-        # restore highlights
         for hl in n.get("highlights", []):
             tag = hl.get("tag")
             start = hl.get("start")
@@ -475,31 +635,38 @@ class SimpleNoteApp(tk.Tk):
                 except Exception:
                     pass
 
-        # path label
-        
-        fid = n.get("folder_id")
-        folder = self._find_folder(fid) if fid else None
-        folder_name = folder["name"] if folder and "name" in folder else ""
-        title = n.get("title", "")
-        self.path_label.config(text=f"-> {folder_name} / {title}")
+        self._apply_link_tags()
+
+        folder_path = self._folder_path_name(n.get("folder_id"))
+        self.path_label.config(text=f"-> {folder_path} / {n.get('title', '')}")
 
     def _save_editor_to_current_note(self):
         if not self.current_note_id:
             return
+
         n = self._find_note(self.current_note_id)
         if not n:
             return
-        n["body"] = self.text.get("1.0", "end-1c")
-        
-        # save highlights
+
+        new_body = self.text.get("1.0", "end-1c")
+
         highlights = []
         for tag in self.bg_tags:
             ranges = self.text.tag_ranges(tag)
             for i in range(0, len(ranges), 2):
-                start = str(ranges[i])
-                end = str(ranges[i + 1])
-                highlights.append({"tag": tag, "start": start, "end": end})
-        n["highlights"] = highlights
+                highlights.append({
+                    "tag": tag,
+                    "start": str(ranges[i]),
+                    "end": str(ranges[i + 1]),
+                })
+
+        # 실제 변경된 경우에만 UPDATE
+        if new_body != n.get("body", "") or highlights != n.get("highlights", []):
+            n["body"] = new_body
+            n["highlights"] = highlights
+            self._db_update_note(n)
+
+    # ---------------- Search (비모달 결과창) ----------------
 
     # ---------------- Search (messagebox only) ----------------
     def search_body_all_notes(self):
@@ -507,33 +674,180 @@ class SimpleNoteApp(tk.Tk):
         if not query:
             return
 
-        # 현재 편집 중인 내용까지 포함해 검색되도록 먼저 저장
         self._save_editor_to_current_note()
 
         q = query.casefold()
-        folder_name_by_id = {f.get("id"): f.get("name", "") for f in self.folders}
+        folder_name_by_id = {
+            f.get("id"): self._folder_path_name(f.get("id"))
+            for f in self.folders
+        }
 
         hits = []
         for n in self.notes:
             body = (n.get("body") or "").casefold()
             title = (n.get("title") or "").casefold()
-            
-            # 본문뿐만 아니라 '제목'에도 검색어가 포함되어 있는지 확인
+
             if q in body or q in title:
                 fid = n.get("folder_id")
                 fname = folder_name_by_id.get(fid, "Unknown")
                 display_title = (n.get("title") or "(제목없음)").strip()
-                hits.append(f"{fname} > {display_title}")
+                hits.append((n["id"], f"{fname} > {display_title}"))
 
-        if hits:
-            msg = "\n".join(hits)
-        else:
-            msg = "검색 결과가 없습니다."
+        self._show_search_results(query, hits)
 
-        messagebox.showinfo(f"검색 결과: {query} ({len(hits)}개)", msg)
+    def _show_search_results(self, query, hits):
+        if self.search_window is None or not self.search_window.winfo_exists():
+            self.search_window = tk.Toplevel(self)
+            self.search_window.title("검색 결과")
+            self.search_window.geometry("390x260")
+            self.search_window.minsize(320, 180)
 
+            info = tk.Label(
+                self.search_window,
+                text="결과를 한 번 클릭하면 해당 노트로 이동합니다.",
+                anchor="w",
+                padx=8,
+                pady=6,
+            )
+            info.pack(fill=tk.X)
 
+            frame = ttk.Frame(self.search_window)
+            frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
+            self.search_listbox = tk.Listbox(frame, activestyle="dotbox")
+            self.search_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+            sb = ttk.Scrollbar(frame, orient="vertical", command=self.search_listbox.yview)
+            sb.pack(side=tk.RIGHT, fill=tk.Y)
+            self.search_listbox.configure(yscrollcommand=sb.set)
+
+            # modal grab을 사용하지 않으므로 검색창을 열어둔 채 메인 GUI도 조작 가능
+            self.search_listbox.bind("<<ListboxSelect>>", self._on_search_result_click)
+            self.search_window.protocol("WM_DELETE_WINDOW", self._close_search_window)
+
+        self.search_window.title(f"검색 결과: {query} ({len(hits)}개)")
+        self.search_listbox.delete(0, tk.END)
+        self.search_result_note_ids = []
+
+        if not hits:
+            self.search_listbox.insert(tk.END, "검색 결과가 없습니다.")
+            return
+
+        for note_id, display in hits:
+            self.search_result_note_ids.append(note_id)
+            self.search_listbox.insert(tk.END, display)
+
+        self.search_window.deiconify()
+        self.search_window.lift()
+
+    def _close_search_window(self):
+        if self.search_window and self.search_window.winfo_exists():
+            self.search_window.destroy()
+        self.search_window = None
+        self.search_listbox = None
+        self.search_result_note_ids = []
+
+    def _on_search_result_click(self, event=None):
+        if not self.search_listbox:
+            return
+
+        selected = self.search_listbox.curselection()
+        if not selected:
+            return
+
+        index = selected[0]
+        if index >= len(self.search_result_note_ids):
+            return
+
+        note_id = self.search_result_note_ids[index]
+        self._select_note_from_search(note_id)
+
+    def _select_note_from_search(self, note_id):
+        niid = self._iid_note(note_id)
+        if not self.tree.exists(niid):
+            return
+
+        # 현재 편집 내용 먼저 저장
+        self._save_editor_to_current_note()
+
+        # 조상 폴더를 펼쳐 검색된 노트가 보이게 함
+        parent = self.tree.parent(niid)
+        while parent:
+            self.tree.item(parent, open=True)
+            parent = self.tree.parent(parent)
+
+        self.tree.selection_set(niid)
+        self.tree.see(niid)
+        self.current_note_id = note_id
+        self.load_note(note_id)
+
+    # ---------------- URL / Markdown 링크 ----------------
+    def _on_text_key_release(self, event=None):
+        self._apply_link_tags()
+
+    def _apply_link_tags(self):
+        # 이전 링크 태그 제거
+        for tag in self.link_tags:
+            try:
+                self.text.tag_delete(tag)
+            except Exception:
+                pass
+        self.link_tags = []
+
+        content = self.text.get("1.0", "end-1c")
+        if not content:
+            return
+
+        matches = []
+        occupied = []
+
+        # Markdown: [표시문자](https://...)
+        md_pattern = re.compile(r"\[[^\]]+\]\((https?://[^\s)]+)\)")
+        for m in md_pattern.finditer(content):
+            matches.append((m.start(), m.end(), m.group(1)))
+            occupied.append((m.start(), m.end()))
+
+        # 일반 URL. Markdown 내부 URL은 중복 태깅하지 않음
+        url_pattern = re.compile(r"https?://[^\s<>\]\)]+")
+        for m in url_pattern.finditer(content):
+            if any(a <= m.start() < b for a, b in occupied):
+                continue
+            url = m.group(0).rstrip(".,;:")
+            end = m.start() + len(url)
+            matches.append((m.start(), end, url))
+
+        for idx, (start_offset, end_offset, url) in enumerate(matches):
+            tag = f"hyperlink_{idx}"
+            self.link_tags.append(tag)
+
+            start = f"1.0+{start_offset}c"
+            end = f"1.0+{end_offset}c"
+
+            self.text.tag_add(tag, start, end)
+            self.text.tag_configure(tag, foreground="#0563C1", underline=True)
+            self.text.tag_bind(
+                tag,
+                "<Button-1>",
+                lambda e, target=url: self._open_web_link(target)
+            )
+            self.text.tag_bind(
+                tag,
+                "<Enter>",
+                lambda e: self.text.config(cursor="hand2")
+            )
+            self.text.tag_bind(
+                tag,
+                "<Leave>",
+                lambda e: self.text.config(cursor="xterm")
+            )
+
+    def _open_web_link(self, url):
+        try:
+            webbrowser.open(url, new=2)
+        except Exception:
+            messagebox.showerror("링크 열기 실패", f"웹페이지를 열 수 없습니다.\n{url}")
+
+    # ---------------- Simulate ENTER key ----------------
 
     # ---------------- Simulate ENTER key ----------------
     # def simulate_enter(self):   기본 엔터 기능과 동일
@@ -618,6 +932,19 @@ class SimpleNoteApp(tk.Tk):
         self.attributes("-topmost", bool(self.topmost_var.get()))
 
     # ---------------- Helpers ----------------
+    def _folder_path_name(self, folder_id: str) -> str:
+        folder = self._find_folder(folder_id) if folder_id else None
+        if not folder:
+            return ""
+
+        parent_id = folder.get("parent_id")
+        if parent_id:
+            parent = self._find_folder(parent_id)
+            if parent:
+                return f"{parent.get('name', '')} / {folder.get('name', '')}"
+
+        return folder.get("name", "")
+
     def _new_id(self, prefix: str) -> str:
         # very simple id generator
         existing = set()
