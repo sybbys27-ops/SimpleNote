@@ -142,14 +142,11 @@ class SimpleNoteApp(tk.Tk):
         self.tree = ttk.Treeview(left, show="tree")
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # 1단 폴더는 옅은 배경색으로, 2단 폴더는 배경색 없이 굵은 글씨로 구분
         # ttk.Treeview는 기본적으로 '글자 부분만' 배경색을 넣는 기능이 없어
-        # 2단 폴더는 행 하이라이트 대신 bold 폰트를 사용합니다.
-        self.tree.tag_configure("folder_level1", background="#EAF3FF")
-        self.tree.tag_configure(
-            "folder_level2",
-            font=(DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, "bold")
-        )
+        # 폴더는 단계와 관계없이 배경색 없이 굵은 글씨로 구분합니다.
+        folder_bold_font = (DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, "bold")
+        self.tree.tag_configure("folder_level1", font=folder_bold_font)
+        self.tree.tag_configure("folder_level2", font=folder_bold_font)
 
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.tree.bind("<Button-1>", self.on_tree_click_toggle)
