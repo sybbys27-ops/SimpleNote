@@ -142,9 +142,14 @@ class SimpleNoteApp(tk.Tk):
         self.tree = ttk.Treeview(left, show="tree")
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # 폴더 단계가 눈에 잘 들어오도록 옅은 배경색 적용
+        # 1단 폴더는 옅은 배경색으로, 2단 폴더는 배경색 없이 굵은 글씨로 구분
+        # ttk.Treeview는 기본적으로 '글자 부분만' 배경색을 넣는 기능이 없어
+        # 2단 폴더는 행 하이라이트 대신 bold 폰트를 사용합니다.
         self.tree.tag_configure("folder_level1", background="#EAF3FF")
-        self.tree.tag_configure("folder_level2", background="#EEF8E8")
+        self.tree.tag_configure(
+            "folder_level2",
+            font=(DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, "bold")
+        )
 
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.tree.bind("<Button-1>", self.on_tree_click_toggle)
@@ -333,10 +338,20 @@ class SimpleNoteApp(tk.Tk):
 
 # ---------------- Tree build ----------------
     def _build_tree(self):
-        open_folders = [
-            iid for iid in self.tree.get_children("")
-            if self.tree.item(iid, "open")
-        ]
+        # 트리를 다시 만들기 전에 1단/2단을 포함한 모든 열린 폴더 상태를 기억합니다.
+        # 기존 코드는 최상위 폴더만 검사해서 2단 폴더가 매번 닫히는 문제가 있었습니다.
+        open_folders = set()
+
+        def collect_open_folders(parent_iid=""):
+            for iid in self.tree.get_children(parent_iid):
+                if iid.startswith("f:"):
+                    if self.tree.item(iid, "open"):
+                        open_folders.add(iid)
+                    # 부모가 닫혀 있어도 자식의 open 상태 자체는 남아 있을 수 있으므로
+                    # 하위 폴더까지 항상 재귀적으로 확인합니다.
+                    collect_open_folders(iid)
+
+        collect_open_folders("")
         current_selection = self.tree.selection()
 
         self.tree.delete(*self.tree.get_children())
