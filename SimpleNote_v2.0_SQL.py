@@ -1,26 +1,12 @@
 # -*- coding: utf-8 -*-
-import json
-import shutil
 import re
-import sqlite3 # SQLite db저장
 import webbrowser
-import sys  # sys 모듈 추가
+import os
+import requests
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 from tkinter import ttk
-from pathlib import Path
-
-# PyInstaller로 패키징된 경우와 일반 스크립트로 실행될 경우를 구분하여 경로 설정
-if getattr(sys, 'frozen', False):
-    # exe 파일로 묶여서 실행될 때: 실제 exe 파일이 있는 위치를 찾음
-    BASE_DIR = Path(sys.executable).parent
-else:
-    # 파이썬 스크립트(.py)로 실행될 때
-    BASE_DIR = Path(__file__).resolve().parent
-
-# 그 폴더 아래에 파일이 생성되도록 고정합니다.
-DATA_FILE = BASE_DIR / "notes2.0.db"
-
+API_BASE_URL = os.getenv("SIMPLENOTE_API_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
 DEFAULT_FONT_FAMILY = "Malgun Gothic"
@@ -177,127 +163,71 @@ class SimpleNoteApp(tk.Tk):
         self.text.bind("<KeyRelease>", self._on_text_key_release, add="+")
 
 
-# ---------------- Data IO (SQLite CRUD 적용) ----------------
-    def init_db(self):
-        """앱 시작 시 DB 파일과 테이블이 없으면 생성합니다."""
-        with sqlite3.connect(DATA_FILE) as conn:
-            cur = conn.cursor()
-            cur.execute("""CREATE TABLE IF NOT EXISTS folders
-                           (id TEXT PRIMARY KEY, name TEXT)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS notes
-                           (id TEXT PRIMARY KEY, folder_id TEXT, title TEXT, body TEXT, highlights TEXT)""")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_notes_folder_id ON notes(folder_id)")
-            conn.commit()
+# ---------------- Data IO (FastAPI 전체 동기화) ----------------
+    def _default_state(self):
+        self.folders = [{"id": "f1", "name": "Start Folder"}]
+        self.notes = [{
+            "id": "n1",
+            "folder_id": "f1",
+            "title": "메모",
+            "body": "",
+            "highlights": [],
+        }]
 
     def load_all(self):
-        self.init_db()
+        """
+        앱 실행 시 FastAPI에서 전체 데이터를 1회 가져옵니다.
+        Neon 연결 전에는 FastAPI의 임시 메모리 저장소를 사용합니다.
+        """
         self.folders = []
         self.notes = []
 
-        with sqlite3.connect(DATA_FILE) as conn:
-            cur = conn.cursor()
+        try:
+            response = requests.get(f"{API_BASE_URL}/sync/load", timeout=5)
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data", {})
 
-            cur.execute("SELECT id, name FROM folders ORDER BY rowid")
-            for row in cur.fetchall():
-                self.folders.append({"id": row[0], "name": row[1]})
-
-            cur.execute("SELECT id, folder_id, title, body, highlights FROM notes ORDER BY rowid")
-            for row in cur.fetchall():
-                try:
-                    hl = json.loads(row[4]) if row[4] else []
-                except Exception:
-                    hl = []
-
-                self.notes.append({
-                    "id": row[0],
-                    "folder_id": row[1],
-                    "title": row[2],
-                    "body": row[3],
-                    "highlights": hl,
-                })
+            self.folders = data.get("folders", []) or []
+            self.notes = data.get("notes", []) or []
+        except Exception as exc:
+            messagebox.showwarning(
+                "서버 연결 실패",
+                "FastAPI 서버에서 데이터를 불러오지 못했습니다.\n"
+                "기본 빈 메모장으로 시작합니다.\n\n"
+                f"{exc}"
+            )
 
         if not self.folders:
-            folder = {"id": "f1", "name": "Start Folder"}
-            self.folders.append(folder)
-            self._db_insert_folder(folder)
-
-        if not self.notes:
-            note = {
-                "id": "n1",
-                "folder_id": self.folders[0]["id"],
-                "title": "메모",
-                "body": "",
-                "highlights": [],
-            }
-            self.notes.append(note)
-            self._db_insert_note(note)
-
-    def _db_insert_folder(self, folder):
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute(
-                "INSERT INTO folders (id, name) VALUES (?, ?)",
-                (folder["id"], folder.get("name", "")),
-            )
-            conn.commit()
-
-    def _db_update_folder(self, folder):
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute(
-                "UPDATE folders SET name = ? WHERE id = ?",
-                (folder.get("name", ""), folder["id"]),
-            )
-            conn.commit()
-
-    def _db_delete_folder(self, folder_id):
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute("DELETE FROM notes WHERE folder_id = ?", (folder_id,))
-            conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
-            conn.commit()
-
-    def _db_insert_note(self, note):
-        hl_str = json.dumps(note.get("highlights", []), ensure_ascii=False)
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute(
-                """INSERT INTO notes (id, folder_id, title, body, highlights)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (
-                    note["id"],
-                    note.get("folder_id"),
-                    note.get("title", ""),
-                    note.get("body", ""),
-                    hl_str,
-                ),
-            )
-            conn.commit()
-
-    def _db_update_note(self, note):
-        hl_str = json.dumps(note.get("highlights", []), ensure_ascii=False)
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute(
-                """UPDATE notes
-                   SET folder_id = ?, title = ?, body = ?, highlights = ?
-                   WHERE id = ?""",
-                (
-                    note.get("folder_id"),
-                    note.get("title", ""),
-                    note.get("body", ""),
-                    hl_str,
-                    note["id"],
-                ),
-            )
-            conn.commit()
-
-    def _db_delete_note(self, note_id):
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
-            conn.commit()
+            self._default_state()
 
     def save_all(self):
         """
-        DB 전체 삭제/재삽입을 하지 않고 현재 편집 중인 노트만
-        실제 변경이 있을 때 UPDATE합니다.
+        저장 버튼 또는 앱 종료 시 현재 전체 폴더/노트 상태를
+        FastAPI에 한 번에 전송합니다.
         """
         self._save_editor_to_current_note()
+
+        payload = {
+            "folders": self.folders,
+            "notes": self.notes,
+        }
+
+        try:
+            response = requests.post(
+                f"{API_BASE_URL}/sync/save",
+                json=payload,
+                timeout=8,
+            )
+            response.raise_for_status()
+            return True
+        except Exception as exc:
+            messagebox.showerror(
+                "저장 실패",
+                "서버에 데이터를 저장하지 못했습니다.\n\n"
+                f"{exc}"
+            )
+            return False
 
     def on_close(self):
         try:
@@ -443,10 +373,8 @@ class SimpleNoteApp(tk.Tk):
 
         if target_type == "folder":
             target_obj["name"] = new_name
-            self._db_update_folder(target_obj)
         else:
             target_obj["title"] = new_name
-            self._db_update_note(target_obj)
 
         self._build_tree()
 
@@ -463,7 +391,6 @@ class SimpleNoteApp(tk.Tk):
                 if not messagebox.askyesno("삭제 확인", "정말로 삭제하시겠습니까?"):
                     return
 
-            self._db_delete_folder(fid)
             self.folders = [f for f in self.folders if f["id"] != fid]
             self.notes = [n for n in self.notes if n.get("folder_id") != fid]
 
@@ -479,7 +406,6 @@ class SimpleNoteApp(tk.Tk):
             if not nid:
                 return
 
-            self._db_delete_note(nid)
             self.notes = [n for n in self.notes if n["id"] != nid]
 
             if self.current_note_id == nid:
@@ -489,8 +415,6 @@ class SimpleNoteApp(tk.Tk):
         self._build_tree()
 
     # ---------------- CRUD ----------------
-
-    # ---------------- CRUD ----------------
     def new_folder(self):
         name = simpledialog.askstring("새 폴더", "폴더 이름:")
         if not name:
@@ -498,7 +422,6 @@ class SimpleNoteApp(tk.Tk):
         new_id = self._new_id("f")
         folder = {"id": new_id, "name": name}
         self.folders.append(folder)
-        self._db_insert_folder(folder)
         self._build_tree()
 
     def new_note(self):
@@ -528,7 +451,6 @@ class SimpleNoteApp(tk.Tk):
         new_id = self._new_id("n")
         note = {"id": new_id, "folder_id": folder_id, "title": title, "body": "", "highlights": []}
         self.notes.append(note)
-        self._db_insert_note(note)
         self._build_tree()
         # select new note
         self.tree.selection_set(self._iid_note(new_id))
@@ -593,7 +515,6 @@ class SimpleNoteApp(tk.Tk):
         if new_body != n.get("body", "") or highlights != n.get("highlights", []):
             n["body"] = new_body
             n["highlights"] = highlights
-            self._db_update_note(n)
 
     # ---------------- Search (비모달 결과창) ----------------
 
