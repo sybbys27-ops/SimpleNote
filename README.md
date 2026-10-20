@@ -13,3 +13,53 @@
 - SimpleNote Tkinter Client → Vercel FastAPI → Neon PostgreSQL
 - 실행 시 전체 데이터 1회 로드
 - 저장 버튼 및 창 종료 시 전체 데이터 1회 저장
+
+## 로컬 테스트 방법
+
+1. 저장소에서 `feature/fastapi-neon` 브랜치를 받습니다.
+2. 가상환경을 만들고 활성화합니다.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+3. 필요한 패키지를 설치합니다.
+
+```powershell
+pip install -r requirements.txt
+```
+
+4. 프로젝트 루트에 `.env` 파일을 만들고 Neon의 pooled connection string을 넣습니다.
+
+```env
+DATABASE_URL=postgresql://...-pooler....neon.tech/neondb?sslmode=require
+```
+
+5. FastAPI를 로컬에서 실행합니다.
+
+```powershell
+uvicorn backend.main:app --reload
+```
+
+6. 브라우저에서 아래 주소로 연결을 확인합니다.
+
+```text
+http://127.0.0.1:8000/health
+http://127.0.0.1:8000/docs
+```
+
+7. SimpleNote 클라이언트를 로컬 FastAPI로 테스트하려면 실행 전에 환경변수를 지정합니다.
+
+```powershell
+$env:SIMPLENOTE_API_URL="http://127.0.0.1:8000"
+python .\SimpleNote_v2.0_SQL.py
+```
+
+8. 확인 항목
+   - 실행 시 `GET /sync/load`로 전체 데이터 1회 로드
+   - 저장 버튼 클릭 시 `POST /sync/save`로 전체 데이터 저장
+   - 창의 X 버튼으로 종료할 때도 전체 데이터 1회 저장
+   - `/sync/load`에서 저장 결과 확인
+
+> `.env` 파일은 GitHub에 커밋하지 않습니다.
