@@ -6,7 +6,7 @@ import requests
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 from tkinter import ttk
-API_BASE_URL = os.getenv("SIMPLENOTE_API_URL", "http://127.0.0.1:8000").rstrip("/")
+API_BASE_URL = os.getenv("SIMPLENOTE_API_URL", "https://simple-note-mauve.vercel.app").rstrip("/")
 
 
 DEFAULT_FONT_FAMILY = "Malgun Gothic"
