@@ -12,7 +12,7 @@
 
 - SimpleNote Tkinter Client → Vercel FastAPI → Neon PostgreSQL
 - 실행 시 전체 데이터 1회 로드
-- 저장 버튼 및 창 종료 시 전체 데이터 1회 저장
+- 저장 버튼 클릭 시에만 전체 데이터 1회 저장
 
 ## 로컬 테스트 방법
 
@@ -59,7 +59,7 @@ python .\SimpleNote_v2.0_SQL.py
 8. 확인 항목
    - 실행 시 `GET /sync/load`로 전체 데이터 1회 로드
    - 저장 버튼 클릭 시 `POST /sync/save`로 전체 데이터 저장
-   - 창의 X 버튼으로 종료할 때도 전체 데이터 1회 저장
+   - 창의 X 버튼으로 종료할 때는 서버에 저장하지 않음
    - `/sync/load`에서 저장 결과 확인
 
 > `.env` 파일은 GitHub에 커밋하지 않습니다.
