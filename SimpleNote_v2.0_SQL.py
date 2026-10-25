@@ -230,10 +230,7 @@ class SimpleNoteApp(tk.Tk):
             return False
 
     def on_close(self):
-        try:
-            self.save_all()
-        finally:
-            self.destroy()
+        self.destroy()
 
 # ---------------- Tree build ----------------
     def _build_tree(self):
