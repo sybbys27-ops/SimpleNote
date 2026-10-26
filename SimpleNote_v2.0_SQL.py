@@ -176,26 +176,39 @@ class SimpleNoteApp(tk.Tk):
 
     def load_all(self):
         """
-        앱 실행 시 FastAPI에서 전체 데이터를 1회 가져옵니다.
-        Neon 연결 전에는 FastAPI의 임시 메모리 저장소를 사용합니다.
+        앱 실행 시 FastAPI에서 전체 데이터를 가져옵니다.
+        서버리스 cold start 등으로 첫 요청이 늦을 수 있어
+        15초 timeout으로 최대 2회 시도합니다.
         """
         self.folders = []
         self.notes = []
 
-        try:
-            response = requests.get(f"{API_BASE_URL}/sync/load", timeout=5)
-            response.raise_for_status()
-            payload = response.json()
-            data = payload.get("data", {})
+        last_error = None
 
-            self.folders = data.get("folders", []) or []
-            self.notes = data.get("notes", []) or []
-        except Exception as exc:
+        for attempt in range(2):
+            try:
+                response = requests.get(
+                    f"{API_BASE_URL}/sync/load",
+                    timeout=15,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                data = payload.get("data", {})
+
+                self.folders = data.get("folders", []) or []
+                self.notes = data.get("notes", []) or []
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
             messagebox.showwarning(
                 "서버 연결 실패",
                 "FastAPI 서버에서 데이터를 불러오지 못했습니다.\n"
-                "기본 빈 메모장으로 시작합니다.\n\n"
-                f"{exc}"
+                "2회 연결을 시도했지만 실패하여 기본 빈 메모장으로 시작합니다.\n"
+                "저장 버튼을 누르기 전에는 서버 데이터가 변경되지 않습니다.\n\n"
+                f"{last_error}"
             )
 
         if not self.folders:
@@ -203,7 +216,7 @@ class SimpleNoteApp(tk.Tk):
 
     def save_all(self):
         """
-        저장 버튼 또는 앱 종료 시 현재 전체 폴더/노트 상태를
+        저장 버튼 클릭 시 현재 전체 폴더/노트 상태를
         FastAPI에 한 번에 전송합니다.
         """
         self._save_editor_to_current_note()
@@ -217,7 +230,7 @@ class SimpleNoteApp(tk.Tk):
             response = requests.post(
                 f"{API_BASE_URL}/sync/save",
                 json=payload,
-                timeout=8,
+                timeout=15,
             )
             response.raise_for_status()
             return True
