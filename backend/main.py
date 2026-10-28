@@ -1,8 +1,9 @@
 import os
+import hmac
 
 import psycopg
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
@@ -66,7 +67,21 @@ def load_state():
 
 
 @app.post("/sync/save")
-def save_state(state: AppState):
+def save_state(
+    state: AppState,
+    x_app_password: str | None = Header(default=None),
+):
+    expected_password = os.getenv("APP_PASSWORD")
+    if not expected_password:
+        raise HTTPException(
+            status_code=500,
+            detail="APP_PASSWORD environment variable is not configured.",
+        )
+
+    provided_password = x_app_password or ""
+    if not hmac.compare_digest(provided_password, expected_password):
+        raise HTTPException(status_code=403, detail="Invalid password.")
+
     database_url = get_database_url()
 
     data = {
