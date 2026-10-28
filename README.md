@@ -23,6 +23,7 @@
 - SimpleNote Tkinter Client → Vercel FastAPI → Neon PostgreSQL
 - 실행 시 전체 데이터 로드(15초 timeout, 실패 시 1회 자동 재시도)
 - 저장 버튼 클릭 시에만 전체 데이터 1회 저장(15초 timeout)
+- 저장 시 4자리 PW를 Vercel/로컬 환경변수 `APP_PASSWORD`와 비교하며, 틀리면 HTTP 403으로 저장 차단
 
 ## 로컬 테스트 방법
 
@@ -44,6 +45,7 @@ pip install -r requirements.txt
 
 ```env
 DATABASE_URL=postgresql://...-pooler....neon.tech/neondb?sslmode=require
+APP_PASSWORD=1234
 ```
 
 5. FastAPI를 로컬에서 실행합니다.
