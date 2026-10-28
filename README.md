@@ -1,5 +1,15 @@
 # SimpleNote
 
+## 브랜치 기록
+
+- `feature/v2.1-core-improvements`: 기존 SimpleNote의 핵심 사용성 개선용 브랜치
+  - SQLite 저장 방식을 전체 삭제/재삽입에서 개별 CRUD 방식으로 개선
+  - 폴더 열림 상태 유지
+  - 웹/Markdown 링크 클릭 지원
+  - 검색 결과 1회 클릭으로 해당 노트 이동
+  - 폴더/노트 이름 변경 시 기존 이름을 입력창에 표시
+  - 이후 `main`에 merge 완료
+
 ## 변경 목록
 
 - SQLite 저장 방식을 전체 삭제/재삽입 방식에서 개별 CRUD(INSERT / UPDATE / DELETE) 방식으로 변경
