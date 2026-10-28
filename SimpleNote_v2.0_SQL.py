@@ -17,7 +17,7 @@ WINDOW_W, WINDOW_H = 540, 500
 class SimpleNoteApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Simple Notes : 가라실험실 ver2.0")
+        self.title("Simple Notes Neon v2.2.0")
         self.geometry(f"{WINDOW_W}x{WINDOW_H}")
         self.minsize(520, 420)
 
