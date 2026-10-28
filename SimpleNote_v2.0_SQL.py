@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 from tkinter import ttk
 API_BASE_URL = os.getenv("SIMPLENOTE_API_URL", "https://simple-note-mauve.vercel.app").rstrip("/")
+APP_TITLE = "Simple Notes Neon v2.2.0"
 
 
 DEFAULT_FONT_FAMILY = "Malgun Gothic"
@@ -17,7 +18,7 @@ WINDOW_W, WINDOW_H = 540, 500
 class SimpleNoteApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Simple Notes Neon v2.2.0")
+        self.title(APP_TITLE)
         self.geometry(f"{WINDOW_W}x{WINDOW_H}")
         self.minsize(520, 420)
 
@@ -114,6 +115,26 @@ class SimpleNoteApp(tk.Tk):
         tk.Button(hl, text="지우기", command=self.clear_highlight).pack(side=tk.LEFT, padx=(10, 6))
         tk.Button(hl, text="ENTER", command=self.simulate_enter).pack(side=tk.LEFT, padx=4)
         tk.Button(hl, text="DEL", command=self.simulate_del).pack(side=tk.LEFT, padx=4)
+
+        # 저장 권한 확인용 4자리 PW
+        self.password_var = tk.StringVar()
+        self.password_entry = tk.Entry(
+            hl,
+            textvariable=self.password_var,
+            width=7,
+            show="*",
+            justify="center",
+        )
+        self.password_entry.pack(side=tk.RIGHT, padx=(4, 2))
+        tk.Label(hl, text="pw").pack(side=tk.RIGHT, padx=(8, 0))
+
+        # 저장 차단 시 잠깐 표시되는 상태 라벨
+        self.lock_label = tk.Label(
+            hl,
+            text="",
+            font=(self.font_family, self.font_size, "bold"),
+        )
+        self.lock_label.pack(side=tk.RIGHT, padx=(8, 4))
 
         # Paned window
         paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
@@ -214,10 +235,39 @@ class SimpleNoteApp(tk.Tk):
         if not self.folders:
             self._default_state()
 
+    def _show_locked_warning(self):
+        """저장 권한이 없을 때 팝업 없이 강하게 알립니다."""
+        self.title(f"{APP_TITLE} - LOCKED")
+        self.password_entry.focus_set()
+
+        try:
+            normal_bg = self.password_entry.cget("bg")
+        except Exception:
+            normal_bg = "white"
+
+        colors = ["#FF3B30", normal_bg] * 5
+        lock_colors = ["#FFB000", "#FFD84D"] * 5
+
+        def blink(step=0):
+            if step < len(colors):
+                self.password_entry.configure(bg=colors[step])
+                self.lock_label.configure(
+                    text="LOCKED",
+                    fg="#7A2E00",
+                    bg=lock_colors[step],
+                )
+                self.after(180, lambda: blink(step + 1))
+            else:
+                self.password_entry.configure(bg=normal_bg)
+                self.lock_label.configure(text="", bg=self.cget("bg"))
+                self.title(APP_TITLE)
+
+        blink()
+
     def save_all(self):
         """
         저장 버튼 클릭 시 현재 전체 폴더/노트 상태를
-        FastAPI에 한 번에 전송합니다.
+        PW와 함께 FastAPI에 전송합니다.
         """
         self._save_editor_to_current_note()
 
@@ -230,8 +280,14 @@ class SimpleNoteApp(tk.Tk):
             response = requests.post(
                 f"{API_BASE_URL}/sync/save",
                 json=payload,
+                headers={"X-App-Password": self.password_var.get().strip()},
                 timeout=15,
             )
+
+            if response.status_code == 403:
+                self._show_locked_warning()
+                return False
+
             response.raise_for_status()
             return True
         except Exception as exc:
