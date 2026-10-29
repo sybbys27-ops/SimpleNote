@@ -1,26 +1,13 @@
 # -*- coding: utf-8 -*-
-import json
-import shutil
 import re
-import sqlite3 # SQLite db저장
 import webbrowser
-import sys  # sys 모듈 추가
+import os
+import requests
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 from tkinter import ttk
-from pathlib import Path
-
-# PyInstaller로 패키징된 경우와 일반 스크립트로 실행될 경우를 구분하여 경로 설정
-if getattr(sys, 'frozen', False):
-    # exe 파일로 묶여서 실행될 때: 실제 exe 파일이 있는 위치를 찾음
-    BASE_DIR = Path(sys.executable).parent
-else:
-    # 파이썬 스크립트(.py)로 실행될 때
-    BASE_DIR = Path(__file__).resolve().parent
-
-# 그 폴더 아래에 파일이 생성되도록 고정합니다.
-DATA_FILE = BASE_DIR / "notes2.0.db"
-
+API_BASE_URL = os.getenv("SIMPLENOTE_API_URL", "https://simple-note-mauve.vercel.app").rstrip("/")
+APP_TITLE = "Simple Notes Neon v2.2.0"
 
 
 DEFAULT_FONT_FAMILY = "Malgun Gothic"
@@ -31,7 +18,7 @@ WINDOW_W, WINDOW_H = 540, 500
 class SimpleNoteApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Simple Notes : 가라실험실 ver2.0")
+        self.title(APP_TITLE)
         self.geometry(f"{WINDOW_W}x{WINDOW_H}")
         self.minsize(520, 420)
 
@@ -129,6 +116,26 @@ class SimpleNoteApp(tk.Tk):
         tk.Button(hl, text="ENTER", command=self.simulate_enter).pack(side=tk.LEFT, padx=4)
         tk.Button(hl, text="DEL", command=self.simulate_del).pack(side=tk.LEFT, padx=4)
 
+        # 저장 권한 확인용 4자리 PW
+        self.password_var = tk.StringVar()
+        self.password_entry = tk.Entry(
+            hl,
+            textvariable=self.password_var,
+            width=7,
+            show="*",
+            justify="center",
+        )
+        self.password_entry.pack(side=tk.RIGHT, padx=(4, 2))
+        tk.Label(hl, text="pw").pack(side=tk.RIGHT, padx=(8, 0))
+
+        # 저장 차단 시 잠깐 표시되는 상태 라벨
+        self.lock_label = tk.Label(
+            hl,
+            text="",
+            font=(self.font_family, self.font_size, "bold"),
+        )
+        self.lock_label.pack(side=tk.RIGHT, padx=(8, 4))
+
         # Paned window
         paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
@@ -177,133 +184,122 @@ class SimpleNoteApp(tk.Tk):
         self.text.bind("<KeyRelease>", self._on_text_key_release, add="+")
 
 
-# ---------------- Data IO (SQLite CRUD 적용) ----------------
-    def init_db(self):
-        """앱 시작 시 DB 파일과 테이블이 없으면 생성합니다."""
-        with sqlite3.connect(DATA_FILE) as conn:
-            cur = conn.cursor()
-            cur.execute("""CREATE TABLE IF NOT EXISTS folders
-                           (id TEXT PRIMARY KEY, name TEXT)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS notes
-                           (id TEXT PRIMARY KEY, folder_id TEXT, title TEXT, body TEXT, highlights TEXT)""")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_notes_folder_id ON notes(folder_id)")
-            conn.commit()
+# ---------------- Data IO (FastAPI 전체 동기화) ----------------
+    def _default_state(self):
+        self.folders = [{"id": "f1", "name": "Start Folder"}]
+        self.notes = [{
+            "id": "n1",
+            "folder_id": "f1",
+            "title": "메모",
+            "body": "",
+            "highlights": [],
+        }]
 
     def load_all(self):
-        self.init_db()
+        """
+        앱 실행 시 FastAPI에서 전체 데이터를 가져옵니다.
+        서버리스 cold start 등으로 첫 요청이 늦을 수 있어
+        15초 timeout으로 최대 2회 시도합니다.
+        """
         self.folders = []
         self.notes = []
 
-        with sqlite3.connect(DATA_FILE) as conn:
-            cur = conn.cursor()
+        last_error = None
 
-            cur.execute("SELECT id, name FROM folders ORDER BY rowid")
-            for row in cur.fetchall():
-                self.folders.append({"id": row[0], "name": row[1]})
+        for attempt in range(2):
+            try:
+                response = requests.get(
+                    f"{API_BASE_URL}/sync/load",
+                    timeout=15,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                data = payload.get("data", {})
 
-            cur.execute("SELECT id, folder_id, title, body, highlights FROM notes ORDER BY rowid")
-            for row in cur.fetchall():
-                try:
-                    hl = json.loads(row[4]) if row[4] else []
-                except Exception:
-                    hl = []
+                self.folders = data.get("folders", []) or []
+                self.notes = data.get("notes", []) or []
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
 
-                self.notes.append({
-                    "id": row[0],
-                    "folder_id": row[1],
-                    "title": row[2],
-                    "body": row[3],
-                    "highlights": hl,
-                })
+        if last_error is not None:
+            messagebox.showwarning(
+                "서버 연결 실패",
+                "FastAPI 서버에서 데이터를 불러오지 못했습니다.\n"
+                "2회 연결을 시도했지만 실패하여 기본 빈 메모장으로 시작합니다.\n"
+                "저장 버튼을 누르기 전에는 서버 데이터가 변경되지 않습니다.\n\n"
+                f"{last_error}"
+            )
 
         if not self.folders:
-            folder = {"id": "f1", "name": "Start Folder"}
-            self.folders.append(folder)
-            self._db_insert_folder(folder)
+            self._default_state()
 
-        if not self.notes:
-            note = {
-                "id": "n1",
-                "folder_id": self.folders[0]["id"],
-                "title": "메모",
-                "body": "",
-                "highlights": [],
-            }
-            self.notes.append(note)
-            self._db_insert_note(note)
+    def _show_locked_warning(self):
+        """저장 권한이 없을 때 팝업 없이 강하게 알립니다."""
+        self.title(f"{APP_TITLE} - LOCKED")
+        self.password_entry.focus_set()
 
-    def _db_insert_folder(self, folder):
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute(
-                "INSERT INTO folders (id, name) VALUES (?, ?)",
-                (folder["id"], folder.get("name", "")),
-            )
-            conn.commit()
+        try:
+            normal_bg = self.password_entry.cget("bg")
+        except Exception:
+            normal_bg = "white"
 
-    def _db_update_folder(self, folder):
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute(
-                "UPDATE folders SET name = ? WHERE id = ?",
-                (folder.get("name", ""), folder["id"]),
-            )
-            conn.commit()
+        colors = ["#FF3B30", normal_bg] * 5
+        lock_colors = ["#FFB000", "#FFD84D"] * 5
 
-    def _db_delete_folder(self, folder_id):
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute("DELETE FROM notes WHERE folder_id = ?", (folder_id,))
-            conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
-            conn.commit()
+        def blink(step=0):
+            if step < len(colors):
+                self.password_entry.configure(bg=colors[step])
+                self.lock_label.configure(
+                    text="LOCKED",
+                    fg="#7A2E00",
+                    bg=lock_colors[step],
+                )
+                self.after(180, lambda: blink(step + 1))
+            else:
+                self.password_entry.configure(bg=normal_bg)
+                self.lock_label.configure(text="", bg=self.cget("bg"))
+                self.title(APP_TITLE)
 
-    def _db_insert_note(self, note):
-        hl_str = json.dumps(note.get("highlights", []), ensure_ascii=False)
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute(
-                """INSERT INTO notes (id, folder_id, title, body, highlights)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (
-                    note["id"],
-                    note.get("folder_id"),
-                    note.get("title", ""),
-                    note.get("body", ""),
-                    hl_str,
-                ),
-            )
-            conn.commit()
-
-    def _db_update_note(self, note):
-        hl_str = json.dumps(note.get("highlights", []), ensure_ascii=False)
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute(
-                """UPDATE notes
-                   SET folder_id = ?, title = ?, body = ?, highlights = ?
-                   WHERE id = ?""",
-                (
-                    note.get("folder_id"),
-                    note.get("title", ""),
-                    note.get("body", ""),
-                    hl_str,
-                    note["id"],
-                ),
-            )
-            conn.commit()
-
-    def _db_delete_note(self, note_id):
-        with sqlite3.connect(DATA_FILE) as conn:
-            conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
-            conn.commit()
+        blink()
 
     def save_all(self):
         """
-        DB 전체 삭제/재삽입을 하지 않고 현재 편집 중인 노트만
-        실제 변경이 있을 때 UPDATE합니다.
+        저장 버튼 클릭 시 현재 전체 폴더/노트 상태를
+        PW와 함께 FastAPI에 전송합니다.
         """
         self._save_editor_to_current_note()
 
-    def on_close(self):
+        payload = {
+            "folders": self.folders,
+            "notes": self.notes,
+        }
+
         try:
-            self.save_all()
-        finally:
-            self.destroy()
+            response = requests.post(
+                f"{API_BASE_URL}/sync/save",
+                json=payload,
+                headers={"X-App-Password": self.password_var.get().strip()},
+                timeout=15,
+            )
+
+            if response.status_code == 403:
+                self._show_locked_warning()
+                return False
+
+            response.raise_for_status()
+            return True
+        except Exception as exc:
+            messagebox.showerror(
+                "저장 실패",
+                "서버에 데이터를 저장하지 못했습니다.\n\n"
+                f"{exc}"
+            )
+            return False
+
+    def on_close(self):
+        self.destroy()
 
 # ---------------- Tree build ----------------
     def _build_tree(self):
@@ -443,10 +439,8 @@ class SimpleNoteApp(tk.Tk):
 
         if target_type == "folder":
             target_obj["name"] = new_name
-            self._db_update_folder(target_obj)
         else:
             target_obj["title"] = new_name
-            self._db_update_note(target_obj)
 
         self._build_tree()
 
@@ -463,7 +457,6 @@ class SimpleNoteApp(tk.Tk):
                 if not messagebox.askyesno("삭제 확인", "정말로 삭제하시겠습니까?"):
                     return
 
-            self._db_delete_folder(fid)
             self.folders = [f for f in self.folders if f["id"] != fid]
             self.notes = [n for n in self.notes if n.get("folder_id") != fid]
 
@@ -479,7 +472,6 @@ class SimpleNoteApp(tk.Tk):
             if not nid:
                 return
 
-            self._db_delete_note(nid)
             self.notes = [n for n in self.notes if n["id"] != nid]
 
             if self.current_note_id == nid:
@@ -489,8 +481,6 @@ class SimpleNoteApp(tk.Tk):
         self._build_tree()
 
     # ---------------- CRUD ----------------
-
-    # ---------------- CRUD ----------------
     def new_folder(self):
         name = simpledialog.askstring("새 폴더", "폴더 이름:")
         if not name:
@@ -498,7 +488,6 @@ class SimpleNoteApp(tk.Tk):
         new_id = self._new_id("f")
         folder = {"id": new_id, "name": name}
         self.folders.append(folder)
-        self._db_insert_folder(folder)
         self._build_tree()
 
     def new_note(self):
@@ -528,7 +517,6 @@ class SimpleNoteApp(tk.Tk):
         new_id = self._new_id("n")
         note = {"id": new_id, "folder_id": folder_id, "title": title, "body": "", "highlights": []}
         self.notes.append(note)
-        self._db_insert_note(note)
         self._build_tree()
         # select new note
         self.tree.selection_set(self._iid_note(new_id))
@@ -593,7 +581,6 @@ class SimpleNoteApp(tk.Tk):
         if new_body != n.get("body", "") or highlights != n.get("highlights", []):
             n["body"] = new_body
             n["highlights"] = highlights
-            self._db_update_note(n)
 
     # ---------------- Search (비모달 결과창) ----------------
 
