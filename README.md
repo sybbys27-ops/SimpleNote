@@ -2,6 +2,7 @@
 
 ## 브랜치 기록
 
+- `feature/fastapi-neon`: Vercel FastAPI + Neon PostgreSQL 전환 및 PW 저장 보호 기능 개발 브랜치. 안정화 후 `main`에 merge.
 - `feature/v2.1-core-improvements`: 기존 SimpleNote의 핵심 사용성 개선용 브랜치
   - SQLite 저장 방식을 전체 삭제/재삽입에서 개별 CRUD 방식으로 개선
   - 폴더 열림 상태 유지
@@ -27,7 +28,7 @@
 
 ## 로컬 테스트 방법
 
-1. 저장소에서 `feature/fastapi-neon` 브랜치를 받습니다.
+1. 저장소의 `main` 브랜치를 받습니다.
 2. 가상환경을 만들고 활성화합니다.
 
 ```powershell
