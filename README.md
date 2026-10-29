@@ -1,5 +1,6 @@
 # SimpleNote
 이것인 개인용 웹 버전입니다.
+
 <img width="665" height="493" alt="image" src="https://github.com/user-attachments/assets/b3c392b0-c255-48d7-bf4f-01b83d3ce858" />
 
 
