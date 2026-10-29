@@ -1,11 +1,11 @@
 # SimpleNote
 <img width="665" height="493" alt="image" src="https://github.com/user-attachments/assets/b3c392b0-c255-48d7-bf4f-01b83d3ce858" />
 
-###이것인 개인용 웹 버전입니다.
+### 이것인 개인용 웹 버전입니다.
 
 
 
-##누구나 사용할 수 있는 LOCAK_PC version
+## 누구나 사용할 수 있는 LOCAL_PC version
 https://github.com/sybbys27-ops/SimpleNote/releases#release-V2.1_Local
 
 ## 브랜치 기록
