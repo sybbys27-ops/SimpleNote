@@ -1,4 +1,6 @@
 # SimpleNote
+<img width="729" height="685" alt="image" src="https://github.com/user-attachments/assets/08364341-5412-44bb-bc2e-a92e716467c0" />
+
 
 ## 브랜치 기록
 
